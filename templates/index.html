@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card" style="margin-top: 10vh; max-width: 600px; margin-left: auto; margin-right: auto;">
+    <h1>Jam Sync</h1>
+    <p style="color: var(--text-muted); font-size: 1.2rem; margin-bottom: 2rem;">
+        Listen to YouTube songs in perfect sync with your friends. <br>
+        Create a room, share the link, and vibe together.
+    </p>
+
+    <a href="{{ url_for('create_room') }}" class="btn" style="font-size: 1.2rem; padding: 1rem 2rem;">
+        🚀 Create Party Room
+    </a>
+</div>
+{% endblock %}

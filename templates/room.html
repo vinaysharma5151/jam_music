@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div style="display: flex; flex-direction: column; gap: 2rem;">
+    <!-- Header / Nav -->
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 style="margin:0;">Room: <span style="color:var(--accent);">{{ room_id }}</span></h2>
+        <button onclick="copyLink()" class="btn btn-secondary" id="shareBtn">🔗 Copy Invite Link</button>
+    </div>
+
+    <!-- Main Player Area -->
+    <div class="card" style="padding: 1rem; overflow: hidden;">
+        <div id="player-container"
+            style="position: relative; padding-bottom: 56.25%; height: 0; overflow: hidden; border-radius: 12px;">
+            <div id="player" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%;"></div>
+            <!-- Overlay to prevent direct interaction if desired, but we want some interaction maybe? 
+                 Let's leave it interactable but sync events will override. -->
+        </div>
+
+        <!-- Custom Controls -->
+        <div style="display: flex; justify-content: center; align-items: center; gap: 1rem; margin-top: 1.5rem;">
+            <button onclick="sendSyncAction('play')" class="btn">▶ Play</button>
+            <button onclick="sendSyncAction('pause')" class="btn btn-secondary">⏸ Pause</button>
+            <button onclick="playNext()" class="btn btn-secondary">⏭ Next</button>
+        </div>
+
+        <p id="status-msg" style="color: var(--text-muted); margin-top: 1rem; font-size: 0.9rem;">Waiting for video...
+        </p>
+    </div>
+
+    <!-- Queue & Add Area -->
+    <div class="card">
+        <h3>Add Song</h3>
+        <div style="display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+            <input type="text" id="videoUrl" placeholder="Paste YouTube URL (e.g. youtube.com/watch?v=...)">
+            <button onclick="addToQueue()" class="btn">Add to Queue</button>
+        </div>
+
+        <h3 style="margin-top: 2rem; text-align: left;">Up Next</h3>
+        <ul id="queue-list"
+            style="list-style: none; padding: 0; text-align: left; max-height: 200px; overflow-y: auto;">
+            <li style="color: var(--text-muted); font-style: italic;">Queue is empty</li>
+        </ul>
+    </div>
+</div>
+
+<script>
+    var socket = io();
+    var player;
+    var roomId = "{{ room_id }}";
+    var isSyncing = false; // Flag to prevent play/pause loops
+
+    // Connect & Join
+    socket.on('connect', function () {
+        console.log('Connected to socket!');
+        socket.emit('join', { room_id: roomId });
+    });
+
+    // YouTube API
+    var tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    var firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+    function onYouTubeIframeAPIReady() {
+        player = new YT.Player('player', {
+            height: '100%',
+            width: '100%',
+            playerVars: {
+                'playsinline': 1,
+                'controls': 0, // Hide default controls for custom sync
+                'disablekb': 1,
+                'rel': 0
+            },
+            events: {
+                'onReady': onPlayerReady,
+                'onStateChange': onPlayerStateChange
+            }
+        });
+    }
+
+    function onPlayerReady(event) {
+        // Player ready, wait for init_state
+    }
+
+    // Handle state changes (User interaction -> Server)
+    function onPlayerStateChange(event) {
+        if (isSyncing) return; // Ignore changes caused by sync
+
+        // We can capture seeking here if needed, but it's tricky with 'controls': 0
+        // Since we hid controls, user interactions are limited to our buttons mostly.
+        // But if they click the video it might toggle play/pause.
+
+        if (event.data == YT.PlayerState.PLAYING) {
+            // sendSyncAction('play'); // Only if we want direct click to sync
+        } else if (event.data == YT.PlayerState.PAUSED) {
+            // sendSyncAction('pause');
+        }
+    }
+
+    // Socket Events
+    socket.on('init_state', function (data) {
+        console.log("Init State:", data);
+        updateQueueUI(data.queue);
+
+        if (data.current_video) {
+            loadVideo(data.current_video, data.timestamp, data.is_playing);
+        }
+    });
+
+    socket.on('sync_action', function (data) {
+        console.log("Sync Action:", data);
+        isSyncing = true;
+
+        if (data.action === 'play') {
+            player.playVideo();
+            updateStatus("Playing");
+        } else if (data.action === 'pause') {
+            player.pauseVideo();
+            updateStatus("Paused");
+        }
+
+        if (data.timestamp !== undefined) {
+            // Only seek if difference is significant to avoid stutter
+            let current = player.getCurrentTime();
+            if (Math.abs(current - data.timestamp) > 2) {
+                player.seekTo(data.timestamp);
+            }
+        }
+
+        setTimeout(() => { isSyncing = false; }, 500);
+    });
+
+    socket.on('change_video', function (data) {
+        console.log("Change Video:", data);
+        loadVideo(data.video_id, 0, true);
+    });
+
+    socket.on('update_queue', function (queue) {
+        updateQueueUI(queue);
+    });
+
+    // Helpers
+    function sendSyncAction(action) {
+        let time = player && player.getCurrentTime ? player.getCurrentTime() : 0;
+        socket.emit('sync_action', {
+            room_id: roomId,
+            action: action,
+            timestamp: time
+        });
+
+        // Optimistic update
+        if (action === 'play') player.playVideo();
+        if (action === 'pause') player.pauseVideo();
+    }
+
+    function playNext() {
+        socket.emit('play_next', { room_id: roomId });
+    }
+
+    function addToQueue() {
+        let url = document.getElementById('videoUrl').value;
+        let videoId = extractVideoID(url);
+        if (videoId) {
+            socket.emit('add_to_queue', {
+                room_id: roomId,
+                video_id: videoId
+            });
+            document.getElementById('videoUrl').value = '';
+        } else {
+            alert("Invalid YouTube URL");
+        }
+    }
+
+    function loadVideo(id, startAt, autoPlay) {
+        if (!player || !player.loadVideoById) return;
+
+        player.loadVideoById({
+            videoId: id,
+            startSeconds: startAt
+        });
+
+        updateStatus("Playing: " + id); // Could fetch title via API but ID is ok for now
+    }
+
+    function updateQueueUI(queue) {
+        let list = document.getElementById('queue-list');
+        list.innerHTML = '';
+        if (!queue || queue.length === 0) {
+            list.innerHTML = '<li style="color: var(--text-muted);">Queue is empty</li>';
+            return;
+        }
+
+        queue.forEach((vid, index) => {
+            let li = document.createElement('li');
+            li.textContent = (index + 1) + ". Video ID: " + vid;
+            li.style.padding = "0.5rem";
+            li.style.borderBottom = "1px solid rgba(255,255,255,0.1)";
+            list.appendChild(li);
+        });
+    }
+
+    function extractVideoID(url) {
+        var regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+        var match = url.match(regExp);
+        if (match && match[2].length == 11) {
+            return match[2];
+        } else {
+            return null;
+        }
+    }
+
+    function copyLink() {
+        navigator.clipboard.writeText(window.location.href).then(() => {
+            let btn = document.getElementById('shareBtn');
+            let originalText = btn.innerText;
+            btn.innerText = "✅ Copied!";
+            setTimeout(() => { btn.innerText = originalText; }, 2000);
+        });
+    }
+
+    function updateStatus(msg) {
+        document.getElementById('status-msg').innerText = msg;
+    }
+
+    // Periodic sync of timestamp for late joiners accuracy (server state update)
+    setInterval(() => {
+        if (player && player.getPlayerState && player.getPlayerState() === YT.PlayerState.PLAYING) {
+            // We don't want to broadcast this as an action, just silent update to server?
+            // Or arguably, only the host should do this? 
+            // Ideally we just trust the start time.
+            // But let's leave it for now to avoid complexity.
+        }
+    }, 5000);
+</script>
+{% endblock %}
